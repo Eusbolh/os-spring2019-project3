@@ -5,6 +5,7 @@
  */
 
 #include <stdio.h>
+#include <stdbool.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -15,12 +16,17 @@
 #define TLB_SIZE 16
 #define PAGES 256
 #define PAGE_MASK 255
-
 #define PAGE_SIZE 256
 #define OFFSET_BITS 8
 #define OFFSET_MASK 255
 
-#define MEMORY_SIZE PAGES * PAGE_SIZE
+/**
+ * Number of pages is not equal to number of frames, therefore
+ * we need another constant for number of frames. In addition,
+ * calculation of 'MEMORY_SIZE' must be changes as well.
+ */
+#define FRAMES 64
+#define MEMORY_SIZE PAGES * PAGE_SIZE // TODO: Changes PAGES->FRAMES
 
 // Max number of characters per line of input file to read.
 #define BUFFER_SIZE 10
@@ -74,9 +80,12 @@ void add_to_tlb(unsigned char logical, unsigned char physical) {
 
 int main(int argc, const char *argv[])
 {
-  if (argc != 3) {
-    fprintf(stderr, "Usage ./virtmem backingstore input\n");
-    exit(1);
+
+  /* Validating arguments */
+  bool terminate = false;
+  if (argc != 5 || strcmp(argv[3], "-p") != 0 || atoi(argv[4]) > 1 || atoi(argv[4]) < 0) {
+    printf("\033[1;31m[ERROR] Correct usage: ./virtmem BACKING_STORE.bin addresses.txt -p 0.\033[0m\n");
+    return 0;
   }
   
   const char *backing_filename = argv[1]; 
@@ -119,15 +128,15 @@ int main(int argc, const char *argv[])
       
       // Page fault
       if (physical_page == -1) {
-	page_faults++;
+        page_faults++;
+              
+        physical_page = free_page;
+        free_page++;
         
-	physical_page = free_page;
-	free_page++;
-	
-	// Copy page from backing file into physical memory
-	memcpy(main_memory + physical_page * PAGE_SIZE, backing + logical_page * PAGE_SIZE, PAGE_SIZE);
-	
-	pagetable[logical_page] = physical_page;
+        // Copy page from backing file into physical memory
+        memcpy(main_memory + physical_page * PAGE_SIZE, backing + logical_page * PAGE_SIZE, PAGE_SIZE);
+        
+        pagetable[logical_page] = physical_page;
       }
       
       add_to_tlb(logical_page, physical_page);
