@@ -26,7 +26,8 @@
  * calculation of 'MEMORY_SIZE' must be changes as well.
  */
 #define FRAMES 64
-#define MEMORY_SIZE PAGES * PAGE_SIZE // TODO: Changes PAGES->FRAMES
+#define MEMORY_SIZE FRAMES * PAGE_SIZE // TODO: Changes PAGES->FRAMES
+#define VIRTUAL_MEMORY_SIZE PAGES * PAGE_SIZE
 
 // Max number of characters per line of input file to read.
 #define BUFFER_SIZE 10
@@ -41,13 +42,99 @@ struct tlbentry tlb[TLB_SIZE];
 // number of inserts into TLB that have been completed. Use as tlbindex % TLB_SIZE for the index of the next TLB line to use.
 int tlbindex = 0;
 
-// pagetable[logical_page] is the physical page number for logical page. Value is -1 if that logical page isn't yet in the table.
-int pagetable[PAGES];
+/**
+ * We changed the array implementation from 1D to 2D to keep valid/invalid bit.
+ * pagetable[logical_page][0] is the physical page number for logical page. (-1 if logical page is not in the physical memory)
+ * pagetable[logical_page][1] is the valid/invalid bit for logical page. (0 if logical page is not in the physical memory)
+ */
+int pagetable[PAGES][2];
 
 signed char main_memory[MEMORY_SIZE];
 
 // Pointer to memory mapped backing file
 signed char *backing;
+
+/* Queue Implementation */
+
+struct Queue {
+  int front, rear, size;
+  unsigned capacity;
+  int* array;
+};
+
+struct Queue* createQueue(unsigned capacity) {
+  struct Queue* queue = (struct Queue*) malloc(sizeof(struct Queue));
+  queue->capacity = capacity;
+  queue->front = queue->size = 0;
+  queue->rear = capacity - 1;
+  queue->array = (int*) malloc(queue->capacity * sizeof(int));
+  return queue;
+}
+
+int isFull(struct Queue* queue) {
+  return (queue->size == queue->capacity);
+}
+
+int isEmpty(struct Queue* queue) {
+  return (queue->size == 0);
+}
+
+int isIncluded(struct Queue* queue, int element) {
+  for (int i = 0; i < queue->capacity; i++) {
+    if (queue->array[i] == element) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int enqueue(struct Queue* queue, int item) {
+  if (isFull(queue)) return;
+  queue->rear = (queue->rear + 1) % queue->capacity;
+  queue->array[queue->rear] = item;
+  queue->size = queue->size + 1;
+}
+
+int dequeue(struct Queue* queue) {
+  if (isEmpty(queue)) return -1;
+  int item = queue->array[queue->front];
+  queue->front = (queue->front + 1) % queue->capacity;
+  queue->size = queue->size - 1;
+  return item;
+}
+
+/* *** */
+
+struct Queue* queue;
+unsigned char next_frame = 0;
+unsigned char current_free_frame = 0;
+
+unsigned char getFreeFrame(int mode, int logical_page) {
+  if (mode == 0) {
+    /* Mode: FIFO */
+
+    /* Case 1: There is free frame */
+    if (!isFull(queue)) {
+      enqueue(queue, logical_page);
+      pagetable[logical_page][0] = next_frame;
+      pagetable[logical_page][1] = 1;
+      return next_frame++;
+    }
+    /* Case 2: Given page is not in the set */
+    else if (!isIncluded(queue, logical_page)) {
+      int replaced_page = dequeue(queue);
+      enqueue(queue, logical_page);
+      int free_frame = pagetable[replaced_page][0];
+      pagetable[replaced_page][0] = -1;
+      pagetable[replaced_page][1] = 0;
+      pagetable[logical_page][0] = free_frame;
+      pagetable[logical_page][1] = 1;
+      return free_frame;
+    }
+  } else {
+    /* Mode: LRU */
+  }
+}
 
 int max(int a, int b)
 {
@@ -80,17 +167,24 @@ void add_to_tlb(unsigned char logical, unsigned char physical) {
 
 int main(int argc, const char *argv[])
 {
+  /* Mode Variable */
+  int mode = -1;
+
+  /* Initializing Queue */
+  queue = createQueue(FRAMES);
 
   /* Validating arguments */
   bool terminate = false;
   if (argc != 5 || strcmp(argv[3], "-p") != 0 || atoi(argv[4]) > 1 || atoi(argv[4]) < 0) {
     printf("\033[1;31m[ERROR] Correct usage: ./virtmem BACKING_STORE.bin addresses.txt -p 0.\033[0m\n");
     return 0;
+  } else {
+    mode = atoi(argv[4]);
   }
   
   const char *backing_filename = argv[1]; 
   int backing_fd = open(backing_filename, O_RDONLY);
-  backing = mmap(0, MEMORY_SIZE, PROT_READ, MAP_PRIVATE, backing_fd, 0); 
+  backing = mmap(0, VIRTUAL_MEMORY_SIZE, PROT_READ, MAP_PRIVATE, backing_fd, 0); 
   
   const char *input_filename = argv[2];
   FILE *input_fp = fopen(input_filename, "r");
@@ -98,7 +192,8 @@ int main(int argc, const char *argv[])
   // Fill page table entries with -1 for initially empty table.
   int i;
   for (i = 0; i < PAGES; i++) {
-    pagetable[i] = -1;
+    pagetable[i][0] = -1;
+    pagetable[i][1] = 0;
   }
   
   // Character buffer for reading lines of input file.
@@ -124,8 +219,31 @@ int main(int argc, const char *argv[])
       tlb_hits++;
       // TLB miss
     } else {
-      physical_page = pagetable[logical_page];
+      if (pagetable[logical_page][1] == 0) {
+        /* CASE 1: Page fault occured */
+        
+        /* Incrementing the page faults counter */
+        page_faults++;
+
+        /* Getting a free frame (replacing a one if necessary) */
+        physical_page = getFreeFrame(mode, logical_page);
+
+        /* Copying the content of page into memory */
+        memcpy(main_memory + physical_page * PAGE_SIZE, backing + logical_page * PAGE_SIZE, PAGE_SIZE);
+
+        /* Updating Page Table */
+        pagetable[logical_page][0] = physical_page;
+        pagetable[logical_page][1] = 1;
+      }
+      else {
+        /* CASE 2: Page fault did not occur */
+
+        /* Getting the frame number from page table */
+        physical_page = pagetable[logical_page][0];
+      }
+
       
+      /*
       // Page fault
       if (physical_page == -1) {
         page_faults++;
@@ -136,8 +254,8 @@ int main(int argc, const char *argv[])
         // Copy page from backing file into physical memory
         memcpy(main_memory + physical_page * PAGE_SIZE, backing + logical_page * PAGE_SIZE, PAGE_SIZE);
         
-        pagetable[logical_page] = physical_page;
-      }
+        pagetable[logical_page][0] = physical_page;
+      }*/
       
       add_to_tlb(logical_page, physical_page);
     }
