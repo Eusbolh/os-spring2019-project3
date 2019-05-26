@@ -54,85 +54,144 @@ signed char main_memory[MEMORY_SIZE];
 // Pointer to memory mapped backing file
 signed char *backing;
 
-/* Queue Implementation */
+/* *** */
 
-struct Queue {
-  int front, rear, size;
-  unsigned capacity;
-  int* array;
-};
+/* DLL Queue Implementation */
 
-struct Queue* createQueue(unsigned capacity) {
-  struct Queue* queue = (struct Queue*) malloc(sizeof(struct Queue));
-  queue->capacity = capacity;
-  queue->front = queue->size = 0;
-  queue->rear = capacity - 1;
-  queue->array = (int*) malloc(queue->capacity * sizeof(int));
+typedef struct QNode {
+  struct QNode *prev, *next;
+  unsigned key;
+} QNode;
+
+typedef struct Queue {
+  int size, capacity;
+  QNode *front, *rear;
+} Queue;
+
+QNode* newQNode(int key) {
+  QNode* temp = (QNode *)malloc(sizeof( QNode )); 
+  temp->key = key;
+  temp->prev = temp->next = NULL;
+
+  return temp;
+}
+
+Queue* createQueue(int capacity) {
+  Queue* queue = (Queue *)malloc(sizeof( Queue )); 
+  queue->size = 0; 
+  queue->front = queue->rear = NULL; 
+  queue->capacity = capacity; 
   return queue;
 }
 
-int isFull(struct Queue* queue) {
-  return (queue->size == queue->capacity);
-}
+int isFull(Queue* queue) { return queue->size == queue->capacity; }
 
-int isEmpty(struct Queue* queue) {
-  return (queue->size == 0);
-}
+int isEmpty(Queue* queue) { return queue->rear == NULL; }
 
-int isIncluded(struct Queue* queue, int element) {
-  for (int i = 0; i < queue->capacity; i++) {
-    if (queue->array[i] == element) {
+int isIncluded(Queue* queue, int key) {
+  QNode* temp = queue->front;
+  while (temp != NULL) {
+    if (temp->key == key) {
       return true;
     }
+    temp = temp->next;
   }
   return false;
 }
 
-int enqueue(struct Queue* queue, int item) {
-  if (isFull(queue)) return;
-  queue->rear = (queue->rear + 1) % queue->capacity;
-  queue->array[queue->rear] = item;
-  queue->size = queue->size + 1;
+int dequeue(Queue* queue) {
+  if (isEmpty(queue)) return;
+  if (queue->front == queue->rear)
+    queue->front = NULL;
+  QNode* temp = queue->rear;
+  int key = temp->key;
+  queue->rear = queue->rear->prev; 
+  if (queue->rear) 
+    queue->rear->next = NULL; 
+  free(temp);  
+  queue->size--;
+  return key;
 }
 
-int dequeue(struct Queue* queue) {
-  if (isEmpty(queue)) return -1;
-  int item = queue->array[queue->front];
-  queue->front = (queue->front + 1) % queue->capacity;
-  queue->size = queue->size - 1;
-  return item;
-}
+void enqueue(Queue* queue, int key) { 
+  if (isFull(queue)) {
+    printf("Size: %d, Capacity: %d\n", queue->size, queue->capacity);
+    printf("Queue is full!\n");
+    return;
+  } 
+  QNode* temp = newQNode( key ); 
+  temp->next = queue->front; 
+  if (isEmpty(queue)) {
+    queue->rear = queue->front = temp; 
+  } else { 
+    queue->front->prev = temp; 
+    queue->front = temp; 
+  } 
+  queue->size++; 
+} 
 
 /* *** */
 
-struct Queue* queue;
+void referencePage(Queue* queue, int logical_page) {
+  if(isIncluded(queue, logical_page)) {
+    if (queue->front->key == logical_page) {
+      // Do nothing
+    } else if (queue->rear->key == logical_page) {
+      dequeue(queue);
+      enqueue(queue, logical_page);
+    } else {
+      QNode* temp = queue->front->next;
+      while(temp->key != queue->rear->key) {
+        if (temp->key == logical_page) {
+          temp->prev->next = temp->next;
+          temp->next->prev = temp->prev;
+          queue->size--;
+          enqueue(queue, logical_page);
+          break;
+        }
+        temp = temp->next;
+      }
+    }
+  } else {
+    // Code shouldn't be reached here!
+  }
+}
+
+void printQueue(Queue* queue) {
+  QNode* temp = queue->front;
+  int counter = 0;
+  while (temp != NULL) {
+    printf("#%d: %d\n", counter++, temp->key);
+    temp = temp->next;
+  }
+}
+
 unsigned char next_frame = 0;
 unsigned char current_free_frame = 0;
 
-unsigned char getFreeFrame(int mode, int logical_page) {
-  if (mode == 0) {
-    /* Mode: FIFO */
+unsigned char getFreeFrame(Queue* queue, int mode, int logical_page) {
 
-    /* Case 1: There is free frame */
-    if (!isFull(queue)) {
-      enqueue(queue, logical_page);
-      pagetable[logical_page][0] = next_frame;
-      pagetable[logical_page][1] = 1;
-      return next_frame++;
-    }
-    /* Case 2: Given page is not in the set */
-    else if (!isIncluded(queue, logical_page)) {
-      int replaced_page = dequeue(queue);
-      enqueue(queue, logical_page);
-      int free_frame = pagetable[replaced_page][0];
-      pagetable[replaced_page][0] = -1;
-      pagetable[replaced_page][1] = 0;
-      pagetable[logical_page][0] = free_frame;
-      pagetable[logical_page][1] = 1;
-      return free_frame;
-    }
-  } else {
-    /* Mode: LRU */
+  /* Case 1: There is free frame */
+  if (!isFull(queue)) {
+    // printf("There is frame!\n");
+    enqueue(queue, logical_page);
+    pagetable[logical_page][0] = next_frame;
+    pagetable[logical_page][1] = 1;
+    return next_frame++;
+  }
+  /* Case 2: Given page is not in the set */
+  else if (!isIncluded(queue, logical_page)) {
+    //printf("There is no more frame and the page is not in the set!\n");
+    int replaced_page = dequeue(queue);
+    // printf("Replaced Page: %d\n", replaced_page);
+    // printf("isIncluded: %d\n", isIncluded(queue, replaced_page));
+    enqueue(queue, logical_page);
+    int free_frame = pagetable[replaced_page][0];
+    pagetable[replaced_page][0] = -1;
+    pagetable[replaced_page][1] = 0;
+    pagetable[logical_page][0] = free_frame;
+    pagetable[logical_page][1] = 1;
+    return free_frame;
   }
 }
 
@@ -171,7 +230,8 @@ int main(int argc, const char *argv[])
   int mode = -1;
 
   /* Initializing Queue */
-  queue = createQueue(FRAMES);
+  Queue* queue = createQueue(FRAMES);
+  printf("Size: %d, Capacity: %d\n", queue->size, queue->capacity);
 
   /* Validating arguments */
   bool terminate = false;
@@ -226,7 +286,7 @@ int main(int argc, const char *argv[])
         page_faults++;
 
         /* Getting a free frame (replacing a one if necessary) */
-        physical_page = getFreeFrame(mode, logical_page);
+        physical_page = getFreeFrame(queue, mode, logical_page);
 
         /* Copying the content of page into memory */
         memcpy(main_memory + physical_page * PAGE_SIZE, backing + logical_page * PAGE_SIZE, PAGE_SIZE);
@@ -259,11 +319,13 @@ int main(int argc, const char *argv[])
       
       add_to_tlb(logical_page, physical_page);
     }
+    if (mode == 1)
+      referencePage(queue, logical_page);
     
     int physical_address = (physical_page << OFFSET_BITS) | offset;
     signed char value = main_memory[physical_page * PAGE_SIZE + offset];
     
-    printf("Virtual address: %d Physical address: %d Value: %d\n", logical_address, physical_address, value);
+    // printf("Virtual address: %d Physical address: %d Value: %d\n", logical_address, physical_address, value);
   }
   
   printf("Number of Translated Addresses = %d\n", total_addresses);
